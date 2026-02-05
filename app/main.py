@@ -36,6 +36,10 @@ class ExtractRequest(BaseModel):
     transcription_id: str
 
 
+class ExtractSimpleRequest(BaseModel):
+    url: HttpUrl
+
+
 class VideoMetadata(BaseModel):
     title: str
     duration: int
@@ -115,6 +119,55 @@ async def extract_endpoint(
     except Exception as e:
         error_detail = str(e) or f"{type(e).__name__}: {repr(e)}"
         logger.error(f"Extract failed: {error_detail}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=error_detail)
+
+
+@app.post("/extract-simple", response_model=ExtractResponse)
+async def extract_simple_endpoint(
+    request: ExtractSimpleRequest,
+    _: str = Depends(verify_api_key),
+):
+    """
+    Extract audio from a YouTube video with a simple storage path.
+
+    This is a simplified endpoint for general use that stores files at:
+        downloads/{video_id}.mp3
+
+    Useful for testing or non-FretWise applications.
+    """
+    try:
+        logger.info(f"Processing simple extract request for URL: {request.url}")
+
+        # Download audio
+        logger.info("Starting audio download...")
+        result = await extract_audio(str(request.url))
+        logger.info(f"Download complete: {result.title} ({result.duration}s)")
+
+        # Upload to R2 with simple path
+        r2_key = f"downloads/{result.video_id}.mp3"
+        logger.info(f"Uploading to R2: {r2_key}")
+        r2_url = await upload_to_r2(
+            file_bytes=result.file_bytes,
+            key=r2_key,
+            content_type="audio/mpeg",
+        )
+        logger.info(f"Upload complete: {r2_url}")
+
+        return ExtractResponse(
+            status="completed",
+            r2_url=r2_url,
+            metadata=VideoMetadata(
+                title=result.title,
+                duration=result.duration,
+                channel=result.channel,
+                video_id=result.video_id,
+            ),
+        )
+
+    except Exception as e:
+        error_detail = str(e) or f"{type(e).__name__}: {repr(e)}"
+        logger.error(f"Simple extract failed: {error_detail}")
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=error_detail)
 

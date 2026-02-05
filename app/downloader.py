@@ -26,16 +26,19 @@ class DownloadResult:
 def _get_ytdlp_opts(output_path: str) -> dict:
     """Get yt-dlp options configured for audio extraction."""
     opts = {
-        'format': 'bestaudio/best',
+        'format': 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best',
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'mp3',
-            'preferredquality': '0',
+            'preferredquality': '192',
         }],
         'outtmpl': output_path,
         'noplaylist': True,
         'no_warnings': False,
         'quiet': False,
+
+        # Enable remote JS challenge solver for YouTube nsig
+        'remote_components': ['ejs:github'],
 
         # Anti-detection
         'sleep_interval': 10,
@@ -61,11 +64,12 @@ def _get_ytdlp_opts(output_path: str) -> dict:
     if proxy_url:
         opts['proxy'] = proxy_url
 
-    # Use curl_cffi for browser impersonation if available
+    # Use browser impersonation if curl_cffi is available
     try:
-        import curl_cffi
-        opts['impersonate'] = 'chrome'
-    except ImportError:
+        from yt_dlp.networking.impersonate import ImpersonateTarget
+        import curl_cffi  # noqa: F401 - just check if available
+        opts['impersonate'] = ImpersonateTarget(client='chrome')
+    except (ImportError, Exception):
         pass
 
     return opts

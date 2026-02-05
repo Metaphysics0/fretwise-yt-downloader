@@ -88,12 +88,84 @@ fly secrets set \
 fly deploy
 ```
 
-### 4. Upload cookies (optional, for authenticated downloads)
+## Maintenance
+
+### Cookie Management
+
+YouTube requires cookies from a logged-in browser session to avoid bot detection. Cookies may need to be refreshed periodically (every few weeks/months).
+
+#### Initial Setup / Refresh Cookies
+
+1. **Create a dedicated Google account** for this service (recommended for isolation)
+
+2. **Export cookies from your browser:**
+   - Install the "Get cookies.txt LOCALLY" browser extension ([Firefox](https://addons.mozilla.org/en-US/firefox/addon/get-cookies-txt-locally/) / [Chrome](https://chrome.google.com/webstore/detail/get-cookiestxt-locally/))
+   - Sign into YouTube with the dedicated account
+   - Close all other YouTube tabs (important - prevents cookie rotation)
+   - Click the extension icon on youtube.com → Export
+   - Save as `cookies.txt`
+
+3. **Upload to Fly.io:**
+   ```bash
+   fly ssh sftp shell --app fretwise-yt-downloader
+   ```
+   Then in the SFTP shell:
+   ```
+   put /path/to/cookies.txt /config/cookies.txt
+   exit
+   ```
+
+4. **Verify cookies are working:**
+   ```bash
+   fly ssh console --app fretwise-yt-downloader -C "yt-dlp --cookies /config/cookies.txt --list-formats 'https://www.youtube.com/watch?v=dQw4w9WgXcQ'"
+   ```
+   You should see audio formats (140, 249, 250, 251) listed. If you only see image formats or get a bot error, the cookies need to be refreshed.
+
+#### Troubleshooting
+
+**"Sign in to confirm you're not a bot" error:**
+- Cookies are missing or expired
+- Re-export and upload fresh cookies
+
+**"Requested format is not available" error:**
+- YouTube's JS challenge solver failed
+- Check logs: `fly logs --app fretwise-yt-downloader`
+- The service uses `--remote-components ejs:github` to solve JS challenges
+
+**View logs:**
+```bash
+fly logs --app fretwise-yt-downloader
+```
+
+**SSH into the container:**
+```bash
+fly ssh console --app fretwise-yt-downloader
+```
+
+**Test a download manually:**
+```bash
+fly ssh console --app fretwise-yt-downloader -C "yt-dlp --cookies /config/cookies.txt -x --audio-format mp3 'https://www.youtube.com/watch?v=VIDEO_ID' -o /tmp/test.mp3"
+```
+
+### Updating yt-dlp
+
+yt-dlp releases updates frequently to keep up with YouTube changes. To update:
 
 ```bash
-fly ssh console
-# Then copy your cookies.txt to /config/cookies.txt
+# Redeploy to get latest yt-dlp from requirements.txt
+fly deploy
+
+# Or update requirements.txt to a specific version first:
+# yt-dlp==2024.12.01
 ```
+
+### Redeploying
+
+```bash
+fly deploy
+```
+
+Note: The `/config` volume persists across deployments, so cookies are preserved.
 
 ## Environment Variables
 

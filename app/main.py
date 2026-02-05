@@ -8,8 +8,9 @@ import os
 import subprocess
 import logging
 import traceback
+import httpx
 
-from fastapi import FastAPI, HTTPException, Header, Depends
+from fastapi import FastAPI, HTTPException, Header, Depends, BackgroundTasks
 from pydantic import BaseModel, HttpUrl
 
 from app.downloader import extract_audio
@@ -36,6 +37,13 @@ class ExtractRequest(BaseModel):
     transcription_id: str
 
 
+class ExtractAsyncRequest(BaseModel):
+    url: HttpUrl
+    user_id: str
+    transcription_id: str
+    webhook_url: HttpUrl
+
+
 class ExtractSimpleRequest(BaseModel):
     url: HttpUrl
 
@@ -51,6 +59,19 @@ class ExtractResponse(BaseModel):
     status: str
     r2_url: str
     metadata: VideoMetadata
+
+
+class ExtractAsyncResponse(BaseModel):
+    status: str
+    message: str
+
+
+class WebhookPayload(BaseModel):
+    status: str  # "completed" or "error"
+    transcription_id: str
+    r2_url: str | None = None
+    error: str | None = None
+    metadata: VideoMetadata | None = None
 
 
 class HealthResponse(BaseModel):
@@ -121,6 +142,112 @@ async def extract_endpoint(
         logger.error(f"Extract failed: {error_detail}")
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=error_detail)
+
+
+async def process_extract_and_webhook(
+    url: str,
+    user_id: str,
+    transcription_id: str,
+    webhook_url: str,
+):
+    """Background task: download, upload to R2, then call webhook."""
+    try:
+        logger.info(f"[ASYNC] Starting extract for {url}")
+
+        # Download audio
+        result = await extract_audio(url)
+        logger.info(f"[ASYNC] Download complete: {result.title} ({result.duration}s)")
+
+        # Upload to R2
+        r2_key = youtube_audio_path(user_id, transcription_id)
+        logger.info(f"[ASYNC] Uploading to R2: {r2_key}")
+        r2_url = await upload_to_r2(
+            file_bytes=result.file_bytes,
+            key=r2_key,
+            content_type="audio/mpeg",
+        )
+        logger.info(f"[ASYNC] Upload complete: {r2_url}")
+
+        # Call webhook with success
+        payload = WebhookPayload(
+            status="completed",
+            transcription_id=transcription_id,
+            r2_url=r2_url,
+            metadata=VideoMetadata(
+                title=result.title,
+                duration=result.duration,
+                channel=result.channel,
+                video_id=result.video_id,
+            ),
+        )
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            logger.info(f"[ASYNC] Calling webhook: {webhook_url}")
+            response = await client.post(webhook_url, json=payload.model_dump())
+            logger.info(f"[ASYNC] Webhook response: {response.status_code}")
+
+    except Exception as e:
+        error_detail = str(e) or f"{type(e).__name__}: {repr(e)}"
+        logger.error(f"[ASYNC] Extract failed: {error_detail}")
+        logger.error(traceback.format_exc())
+
+        # Call webhook with error
+        try:
+            payload = WebhookPayload(
+                status="error",
+                transcription_id=transcription_id,
+                error=error_detail,
+            )
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                await client.post(webhook_url, json=payload.model_dump())
+        except Exception as webhook_err:
+            logger.error(f"[ASYNC] Failed to call error webhook: {webhook_err}")
+
+
+@app.post("/extract-async", response_model=ExtractAsyncResponse)
+async def extract_async_endpoint(
+    request: ExtractAsyncRequest,
+    background_tasks: BackgroundTasks,
+    _: str = Depends(verify_api_key),
+):
+    """
+    Extract audio from a YouTube video asynchronously.
+
+    This endpoint:
+    1. Accepts the request and returns immediately
+    2. Downloads audio in the background
+    3. Uploads to R2
+    4. Calls the webhook_url with the result
+
+    Webhook payload on success:
+    {
+        "status": "completed",
+        "transcription_id": "...",
+        "r2_url": "https://...",
+        "metadata": { "title": "...", "duration": 123, "channel": "...", "video_id": "..." }
+    }
+
+    Webhook payload on error:
+    {
+        "status": "error",
+        "transcription_id": "...",
+        "error": "Error message"
+    }
+    """
+    logger.info(f"[ASYNC] Queued extract request for URL: {request.url}")
+
+    background_tasks.add_task(
+        process_extract_and_webhook,
+        str(request.url),
+        request.user_id,
+        request.transcription_id,
+        str(request.webhook_url),
+    )
+
+    return ExtractAsyncResponse(
+        status="accepted",
+        message="Download queued. Webhook will be called on completion.",
+    )
 
 
 @app.post("/extract-simple", response_model=ExtractResponse)

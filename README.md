@@ -56,6 +56,7 @@ export R2_ACCESS_KEY_ID=xxx
 export R2_SECRET_ACCESS_KEY=xxx
 export R2_BUCKET_NAME=fretwise
 export R2_PUBLIC_URL=https://pub-xxx.r2.dev
+export SENTRY_DSN=https://<key>@o<org>.ingest.us.sentry.io/<project>
 
 # Run the server
 uvicorn app.main:app --reload
@@ -79,7 +80,8 @@ fly secrets set \
   R2_ACCESS_KEY_ID="xxx" \
   R2_SECRET_ACCESS_KEY="xxx" \
   R2_BUCKET_NAME="fretwise" \
-  R2_PUBLIC_URL="https://pub-xxx.r2.dev"
+  R2_PUBLIC_URL="https://pub-xxx.r2.dev" \
+  SENTRY_DSN="https://<key>@o<org>.ingest.us.sentry.io/<project>"
 ```
 
 ### 3. Deploy
@@ -177,5 +179,6 @@ Note: The `/config` volume persists across deployments, so cookies are preserved
 | `R2_SECRET_ACCESS_KEY` | R2 secret key |
 | `R2_BUCKET_NAME` | R2 bucket name |
 | `R2_PUBLIC_URL` | Public URL for R2 bucket |
+| `SENTRY_DSN` | Optional Sentry DSN for error/log reporting |
 | `COOKIE_PATH` | Path to cookies.txt (default: /config/cookies.txt) |
 | `PROXY_URL` | Optional proxy URL for yt-dlp |

@@ -9,6 +9,7 @@ import subprocess
 import logging
 import traceback
 import httpx
+import sentry_sdk
 
 from fastapi import FastAPI, HTTPException, Header, Depends, BackgroundTasks
 from pydantic import BaseModel, HttpUrl
@@ -20,6 +21,16 @@ from app.paths import youtube_audio_path
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+sentry_dsn = os.environ.get("SENTRY_DSN")
+if sentry_dsn:
+    sentry_sdk.init(
+        dsn=sentry_dsn,
+        send_default_pii=True,
+        enable_logs=True,
+    )
+else:
+    logger.warning("Sentry disabled: SENTRY_DSN is not set")
 
 
 app = FastAPI(

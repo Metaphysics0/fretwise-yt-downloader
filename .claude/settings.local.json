@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl:*)",
+      "Bash(python3:*)",
+      "Bash(fly ssh console:*)",
+      "Bash(fly secrets list:*)",
+      "Bash(yt-dlp:*)",
+      "Bash(fly ssh sftp shell:*)",
+      "WebFetch(domain:github.com)",
+      "WebSearch",
+      "WebFetch(domain:hub.docker.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(gh api:*)",
+      "Bash(gh search issues:*)"
+    ]
+  }
+}

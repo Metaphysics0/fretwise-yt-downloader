@@ -88,6 +88,7 @@ class WebhookPayload(BaseModel):
 class HealthResponse(BaseModel):
     status: str
     ytdlp_version: str
+    pot_server: str
 
 
 # Auth dependency
@@ -315,7 +316,7 @@ async def health_endpoint():
     """
     Health check endpoint.
 
-    Returns service status and yt-dlp version.
+    Returns service status, yt-dlp version, and POT server status.
     """
     try:
         result = subprocess.run(
@@ -328,7 +329,20 @@ async def health_endpoint():
     except Exception:
         ytdlp_version = "unknown"
 
+    # Check POT server health
+    pot_status = "unhealthy"
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            resp = await client.get("http://127.0.0.1:4416/ping")
+            if resp.status_code == 200:
+                pot_status = "healthy"
+    except Exception:
+        pass
+
+    overall_status = "healthy" if pot_status == "healthy" else "degraded"
+
     return HealthResponse(
-        status="healthy",
+        status=overall_status,
         ytdlp_version=ytdlp_version,
+        pot_server=pot_status,
     )

@@ -40,6 +40,19 @@ def _get_ytdlp_opts(output_path: str) -> dict:
         # Enable remote JS challenge solver for YouTube nsig
         'remote_components': ['ejs:github'],
 
+        # PO token config (required for datacenter IPs to avoid bot detection)
+        # - player_client=web: use web client which supports PO tokens
+        # - fetch_pot=always: force PO token fetching even when yt-dlp thinks it's optional
+        # - webpage_skip=player_response: skip the embedded player response from the webpage
+        #   (it already has LOGIN_REQUIRED), forcing a fresh API call with the PO token
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['web'],
+                'fetch_pot': ['always'],
+                'webpage_skip': ['player_response'],
+            },
+        },
+
         # Anti-detection
         'sleep_interval': 10,
         'max_sleep_interval': 30,

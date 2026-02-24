@@ -89,6 +89,8 @@ class HealthResponse(BaseModel):
     status: str
     ytdlp_version: str
     pot_server: str
+    cookies: str
+    proxy: str
 
 
 # Auth dependency
@@ -339,10 +341,32 @@ async def health_endpoint():
     except Exception:
         pass
 
+    # Check cookies
+    from pathlib import Path
+    cookie_path = os.getenv('COOKIE_PATH', '/config/cookies.txt')
+    cookie_file = Path(cookie_path)
+    if cookie_file.exists():
+        size_kb = cookie_file.stat().st_size / 1024
+        cookies_status = f"found ({size_kb:.1f} KB)"
+    else:
+        cookies_status = "missing"
+
+    # Check proxy
+    proxy_url = os.getenv('PROXY_URL')
+    if proxy_url:
+        # Mask credentials in the URL for the response
+        from urllib.parse import urlparse
+        parsed = urlparse(proxy_url)
+        proxy_status = f"configured ({parsed.hostname})"
+    else:
+        proxy_status = "not configured"
+
     overall_status = "healthy" if pot_status == "healthy" else "degraded"
 
     return HealthResponse(
         status=overall_status,
         ytdlp_version=ytdlp_version,
         pot_server=pot_status,
+        cookies=cookies_status,
+        proxy=proxy_status,
     )

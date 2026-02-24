@@ -5,6 +5,7 @@ Downloads audio from YouTube videos and returns the audio bytes with metadata.
 """
 
 import os
+import uuid
 import tempfile
 import asyncio
 from pathlib import Path
@@ -34,6 +35,7 @@ def _get_ytdlp_opts(output_path: str) -> dict:
         }],
         'outtmpl': output_path,
         'noplaylist': True,
+        'nocheckcertificate': True,
         'no_warnings': False,
         'quiet': False,
 
@@ -42,21 +44,19 @@ def _get_ytdlp_opts(output_path: str) -> dict:
 
         # PO token config (required for datacenter IPs to avoid bot detection)
         # - player_client=web: use web client which supports PO tokens
-        # - fetch_pot=always: force PO token fetching even when yt-dlp thinks it's optional
         # - webpage_skip=player_response: skip the embedded player response from the webpage
         #   (it already has LOGIN_REQUIRED), forcing a fresh API call with the PO token
         'extractor_args': {
             'youtube': {
                 'player_client': ['web'],
-                'fetch_pot': ['always'],
                 'webpage_skip': ['player_response'],
             },
         },
 
-        # Anti-detection
-        'sleep_interval': 10,
-        'max_sleep_interval': 30,
-        'sleep_requests': 2,
+        # Anti-detection (light sleeps — residential proxy rotation handles most detection)
+        'sleep_interval': 2,
+        'max_sleep_interval': 5,
+        'sleep_requests': 1,
 
         # Resilience
         'retries': 10,
@@ -72,18 +72,22 @@ def _get_ytdlp_opts(output_path: str) -> dict:
     if Path(cookie_path).exists():
         opts['cookiefile'] = cookie_path
 
-    # Optional: proxy
+    # Optional: proxy (supports {session} placeholder for per-request IP rotation)
     proxy_url = os.getenv('PROXY_URL')
     if proxy_url:
-        opts['proxy'] = proxy_url
+        session_id = uuid.uuid4().hex[:16]
+        opts['proxy'] = proxy_url.replace('{session}', session_id)
 
     # Use browser impersonation if curl_cffi is available
-    try:
-        from yt_dlp.networking.impersonate import ImpersonateTarget
-        import curl_cffi  # noqa: F401 - just check if available
-        opts['impersonate'] = ImpersonateTarget(client='chrome')
-    except (ImportError, Exception):
-        pass
+    # Skip when proxy is set — Web Unlocker handles bot detection and
+    # curl_cffi's TLS fingerprinting conflicts with the CONNECT tunnel
+    if not proxy_url:
+        try:
+            from yt_dlp.networking.impersonate import ImpersonateTarget
+            import curl_cffi  # noqa: F401 - just check if available
+            opts['impersonate'] = ImpersonateTarget(client='chrome')
+        except (ImportError, Exception):
+            pass
 
     return opts
 

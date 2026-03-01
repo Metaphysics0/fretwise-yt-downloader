@@ -1,7 +1,7 @@
 """
-yt-dlp wrapper for downloading YouTube audio.
+yt-dlp wrapper for downloading audio from video platforms. Supports YouTube, Instagram, and TikTok.
 
-Downloads audio from YouTube videos and returns the audio bytes with metadata.
+Downloads audio from video URLs and returns the audio bytes with metadata.
 """
 
 import os
@@ -16,7 +16,7 @@ import yt_dlp
 
 @dataclass
 class DownloadResult:
-    """Result of a YouTube audio download."""
+    """Result of an audio download from any supported platform."""
     file_bytes: bytes
     title: str
     duration: int
@@ -118,10 +118,10 @@ def _download_sync(url: str) -> DownloadResult:
 
 async def extract_audio(url: str) -> DownloadResult:
     """
-    Download audio from a YouTube URL.
+    Download audio from a video URL.
 
     Args:
-        url: YouTube video URL
+        url: Video URL (YouTube, Instagram, or TikTok)
 
     Returns:
         DownloadResult with file bytes and metadata

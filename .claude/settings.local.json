@@ -12,7 +12,8 @@
       "WebFetch(domain:hub.docker.com)",
       "WebFetch(domain:raw.githubusercontent.com)",
       "Bash(gh api:*)",
-      "Bash(gh search issues:*)"
+      "Bash(gh search issues:*)",
+      "Bash(git:*)"
     ]
   }
 }

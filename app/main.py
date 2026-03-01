@@ -1,7 +1,7 @@
 """
-FastAPI application for YouTube audio extraction.
+FastAPI application for audio extraction from video platforms.
 
-Provides endpoints for extracting audio from YouTube videos and uploading to R2.
+Provides endpoints for extracting audio from YouTube, Instagram, and TikTok and uploading to R2.
 """
 
 import os
@@ -16,7 +16,7 @@ from pydantic import BaseModel, HttpUrl
 
 from app.downloader import extract_audio
 from app.storage import upload_to_r2
-from app.paths import youtube_audio_path
+from app.paths import audio_path, detect_platform
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -34,9 +34,9 @@ else:
 
 
 app = FastAPI(
-    title="FretWise YouTube Audio Extractor",
-    description="Downloads audio from YouTube and uploads to R2",
-    version="1.0.0",
+    title="FretWise Audio Extractor",
+    description="Downloads audio from YouTube, Instagram, and TikTok and uploads to R2",
+    version="1.1.0",
 )
 
 
@@ -113,10 +113,10 @@ async def extract_endpoint(
     _: str = Depends(verify_api_key),
 ):
     """
-    Extract audio from a YouTube video and upload to R2.
+    Extract audio from a YouTube, Instagram, or TikTok video and upload to R2.
 
     This endpoint:
-    1. Downloads audio from the YouTube URL using yt-dlp
+    1. Downloads audio from the URL using yt-dlp
     2. Uploads the MP3 to R2 at the user-scoped path
     3. Returns the public R2 URL and video metadata
 
@@ -131,7 +131,8 @@ async def extract_endpoint(
         logger.info(f"Download complete: {result.title} ({result.duration}s)")
 
         # Upload to R2
-        r2_key = youtube_audio_path(request.user_id, request.transcription_id)
+        platform = detect_platform(str(request.url))
+        r2_key = audio_path(platform, request.user_id, request.transcription_id)
         logger.info(f"Uploading to R2: {r2_key}")
         r2_url = await upload_to_r2(
             file_bytes=result.file_bytes,
@@ -173,7 +174,8 @@ async def process_extract_and_webhook(
         logger.info(f"[ASYNC] Download complete: {result.title} ({result.duration}s)")
 
         # Upload to R2
-        r2_key = youtube_audio_path(user_id, transcription_id)
+        platform = detect_platform(url)
+        r2_key = audio_path(platform, user_id, transcription_id)
         logger.info(f"[ASYNC] Uploading to R2: {r2_key}")
         r2_url = await upload_to_r2(
             file_bytes=result.file_bytes,
@@ -225,7 +227,7 @@ async def extract_async_endpoint(
     _: str = Depends(verify_api_key),
 ):
     """
-    Extract audio from a YouTube video asynchronously.
+    Extract audio from a YouTube, Instagram, or TikTok video asynchronously.
 
     This endpoint:
     1. Accepts the request and returns immediately
@@ -270,7 +272,7 @@ async def extract_simple_endpoint(
     _: str = Depends(verify_api_key),
 ):
     """
-    Extract audio from a YouTube video with a simple storage path.
+    Extract audio from a YouTube, Instagram, or TikTok video with a simple storage path.
 
     This is a simplified endpoint for general use that stores files at:
         downloads/{video_id}.mp3

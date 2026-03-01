@@ -146,7 +146,7 @@ async def extract_endpoint(
             r2_url=r2_url,
             metadata=VideoMetadata(
                 title=result.title,
-                duration=result.duration,
+                duration=int(result.duration or 0),
                 channel=result.channel,
                 video_id=result.video_id,
             ),
@@ -191,7 +191,7 @@ async def process_extract_and_webhook(
             r2_url=r2_url,
             metadata=VideoMetadata(
                 title=result.title,
-                duration=result.duration,
+                duration=int(result.duration or 0),
                 channel=result.channel,
                 video_id=result.video_id,
             ),
@@ -302,7 +302,7 @@ async def extract_simple_endpoint(
             r2_url=r2_url,
             metadata=VideoMetadata(
                 title=result.title,
-                duration=result.duration,
+                duration=int(result.duration or 0),
                 channel=result.channel,
                 video_id=result.video_id,
             ),

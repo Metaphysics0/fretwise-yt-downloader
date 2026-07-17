@@ -1,12 +1,10 @@
-FROM python:3.12-slim
+FROM node:22-bookworm-slim AS pot-builder
 
-# Install system dependencies (including git and native canvas build deps for POT server)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ffmpeg \
-    curl \
-    unzip \
+    ca-certificates \
     git \
     build-essential \
+    python3 \
     pkg-config \
     libcairo2-dev \
     libjpeg-dev \
@@ -15,42 +13,47 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     librsvg2-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Deno (required for some yt-dlp extractors)
-RUN curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh
+RUN git clone --depth 1 --branch 1.3.1 https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git \
+    /opt/pot-server \
+    && cd /opt/pot-server/server \
+    && npm ci \
+    && npx tsc \
+    && npm prune --omit=dev
 
-# Install Node.js 20 (required for POT server)
-RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
-    && apt-get install -y nodejs \
+
+FROM python:3.12-slim-bookworm
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    curl \
+    libcairo2 \
+    libjpeg62-turbo \
+    libpango-1.0-0 \
+    libgif7 \
+    librsvg2-2 \
     && rm -rf /var/lib/apt/lists/*
 
-# Clone bgutil POT server (pinned to commit 9612094 from main, 2026-02-20)
-RUN git clone https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git \
-    /opt/pot-server \
-    && cd /opt/pot-server \
-    && git checkout 96120947fc91ec712f4800d793307e4ab8baaf7f \
-    && cd server \
-    && npm ci \
-    && npx tsc
+COPY --from=pot-builder /usr/local/bin/node /usr/local/bin/node
+COPY --from=pot-builder /opt/pot-server/server/build /opt/pot-server/server/build
+COPY --from=pot-builder /opt/pot-server/server/node_modules /opt/pot-server/server/node_modules
+COPY --from=pot-builder /opt/pot-server/server/package.json /opt/pot-server/server/package.json
 
-# Set working directory
 WORKDIR /app
 
-# Install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
 COPY app/ ./app/
-
-# Copy startup script
+COPY tests/ ./tests/
 COPY start.sh .
-RUN chmod +x start.sh
+RUN python -m unittest discover -s tests \
+    && rm -rf tests \
+    && chmod +x start.sh \
+    && mkdir -p /config
 
-# Create config directory for cookies
-RUN mkdir -p /config
-
-# Expose port
 EXPOSE 8080
 
-# Run via startup script (manages POT server + uvicorn)
+HEALTHCHECK --interval=30s --timeout=5s --start-period=45s --retries=3 \
+    CMD curl --fail --silent http://127.0.0.1:8080/ready || exit 1
+
 CMD ["./start.sh"]

@@ -5,7 +5,7 @@ A self-hosted YouTube audio extraction microservice for FretWise. Downloads audi
 ## Architecture
 
 ```
-FretWise Web App → POST /extract → yt-audio-service → R2 → returns URL
+FretWise Web App → Cloudflare Workflow → POST /extract → R2 → Modal
 ```
 
 ## API
@@ -46,8 +46,13 @@ Returns service status and yt-dlp version.
 ## Local Development
 
 ```bash
-# Install dependencies
-pip install -r requirements.txt
+python3.12 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+git clone --depth 1 --branch 1.3.1 https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git .pot-server
+cd .pot-server/server
+bun install
+bunx tsc
+cd ../..
 
 # Set environment variables
 export API_KEY=test
@@ -58,17 +63,15 @@ export R2_BUCKET_NAME=fretwise
 export R2_PUBLIC_URL=https://pub-xxx.r2.dev
 export SENTRY_DSN=https://<key>@o<org>.ingest.us.sentry.io/<project>
 
-# Run the server
-uvicorn app.main:app --reload
+PATH="$PWD/.venv/bin:$PATH" POT_SERVER_DIR="$PWD/.pot-server/server" ./start.sh
 ```
 
 ## Deployment
 
-### 1. Create Fly.io app and volume
+### 1. Create the persistent cookie volume
 
 ```bash
-fly apps create fretwise-yt-downloader
-fly volumes create yt_cookies --region sjc --size 1
+fly volumes create yt_cookies --region sjc --size 1 --app fretwise-yt-downloader
 ```
 
 ### 2. Set secrets
@@ -87,14 +90,16 @@ fly secrets set \
 ### 3. Deploy
 
 ```bash
-fly deploy
+fly deploy --remote-only --depot=false --ha=false
+
+curl --fail https://fretwise-yt-downloader.fly.dev/ready
 ```
 
 ## Maintenance
 
 ### Cookie Management
 
-YouTube requires cookies from a logged-in browser session to avoid bot detection. Cookies may need to be refreshed periodically (every few weeks/months).
+The service uses yt-dlp's EJS package and a local PO-token provider. A dedicated account cookie file is an optional fallback for videos that YouTube blocks from datacenter IPs. Cookies may need periodic refreshes.
 
 #### Initial Setup / Refresh Cookies
 
@@ -132,7 +137,7 @@ YouTube requires cookies from a logged-in browser session to avoid bot detection
 **"Requested format is not available" error:**
 - YouTube's JS challenge solver failed
 - Check logs: `fly logs --app fretwise-yt-downloader`
-- The service uses `--remote-components ejs:github` to solve JS challenges
+- Verify `/health` reports Node 22+, EJS, and the PO-token server as healthy
 
 **View logs:**
 ```bash
@@ -181,4 +186,9 @@ Note: The `/config` volume persists across deployments, so cookies are preserved
 | `R2_PUBLIC_URL` | Public URL for R2 bucket |
 | `SENTRY_DSN` | Optional Sentry DSN for error/log reporting |
 | `COOKIE_PATH` | Path to cookies.txt (default: /config/cookies.txt) |
-| `PROXY_URL` | Optional proxy URL for yt-dlp |
+| `PROXY_URL` | Optional rotating proxy URL; supports a `{session}` placeholder |
+| `MAX_DURATION_SECONDS` | Maximum source duration; defaults to 1800 seconds |
+| `MAX_AUDIO_BYTES` | Maximum converted MP3 size; defaults to 50MB |
+| `NODE_PATH` | Optional path to a Node 22+ executable used by yt-dlp EJS |
+| `POT_SERVER_DIR` | Optional local path to the built PO-token server |
+| `POT_SERVER_URL` | PO-token health endpoint; defaults to http://127.0.0.1:4416 |

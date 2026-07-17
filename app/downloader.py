@@ -1,132 +1,136 @@
-"""
-yt-dlp wrapper for downloading audio from video platforms. Supports YouTube, Instagram, and TikTok.
-
-Downloads audio from video URLs and returns the audio bytes with metadata.
-"""
-
+import asyncio
 import os
 import uuid
-import tempfile
-import asyncio
-from pathlib import Path
 from dataclasses import dataclass
+from pathlib import Path
 
 import yt_dlp
+
+from app.config import COOKIE_PATH, MAX_AUDIO_BYTES, MAX_DURATION_SECONDS, NODE_PATH, PROXY_URL
+from app.errors import DownloaderError, classify_download_error
+from app.validation import validate_video_url
 
 
 @dataclass
 class DownloadResult:
-    """Result of an audio download from any supported platform."""
-    file_bytes: bytes
+    file_path: Path
     title: str
     duration: int
     channel: str
     video_id: str
 
 
+def _reject_long_video(info: dict, *, incomplete: bool = False) -> str | None:
+    duration = info.get("duration")
+    if duration and duration > MAX_DURATION_SECONDS:
+        return f"Duration exceeds the {MAX_DURATION_SECONDS}-second limit"
+    return None
+
+
 def _get_ytdlp_opts(output_path: str) -> dict:
-    """Get yt-dlp options configured for audio extraction."""
     opts = {
-        'format': 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best',
-        'postprocessors': [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-            'preferredquality': '192',
+        "format": "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best",
+        "postprocessors": [{
+            "key": "FFmpegExtractAudio",
+            "preferredcodec": "mp3",
+            "preferredquality": "192",
         }],
-        'outtmpl': output_path,
-        'noplaylist': True,
-        'nocheckcertificate': True,
-        'no_warnings': False,
-        'quiet': False,
-
-        # Enable remote JS challenge solver for YouTube nsig
-        'remote_components': ['ejs:github'],
-
-        # PO token config (required for datacenter IPs to avoid bot detection)
-        # - player_client=web: use web client which supports PO tokens
-        # - webpage_skip=player_response: skip the embedded player response from the webpage
-        #   (it already has LOGIN_REQUIRED), forcing a fresh API call with the PO token
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['web'],
-                'webpage_skip': ['player_response'],
+        "outtmpl": output_path,
+        "noplaylist": True,
+        "match_filter": _reject_long_video,
+        "js_runtimes": {
+            "node": {"path": NODE_PATH},
+        },
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["mweb"],
             },
         },
-
-        # Anti-detection (light sleeps — residential proxy rotation handles most detection)
-        'sleep_interval': 2,
-        'max_sleep_interval': 5,
-        'sleep_requests': 1,
-
-        # Resilience
-        'retries': 10,
-        'fragment_retries': 10,
-        'retry_sleep_functions': {
-            'http': lambda n: 5 * (2 ** n),
-            'fragment': lambda n: 2 * (2 ** n),
+        "sleep_interval": 2,
+        "max_sleep_interval": 5,
+        "sleep_requests": 1,
+        "socket_timeout": 30,
+        "retries": 5,
+        "fragment_retries": 5,
+        "retry_sleep_functions": {
+            "http": lambda n: min(30, 3 * (2 ** n)),
+            "fragment": lambda n: min(15, 2 * (2 ** n)),
         },
     }
 
-    # Optional: cookies file
-    cookie_path = os.getenv('COOKIE_PATH', '/config/cookies.txt')
-    if Path(cookie_path).exists():
-        opts['cookiefile'] = cookie_path
+    if COOKIE_PATH.exists():
+        opts["cookiefile"] = str(COOKIE_PATH)
 
-    # Optional: proxy (supports {session} placeholder for per-request IP rotation)
-    proxy_url = os.getenv('PROXY_URL')
-    if proxy_url:
+    if PROXY_URL:
         session_id = uuid.uuid4().hex[:16]
-        opts['proxy'] = proxy_url.replace('{session}', session_id)
+        opts["proxy"] = PROXY_URL.replace("{session}", session_id)
 
-    # Use browser impersonation if curl_cffi is available
-    # Skip when proxy is set — Web Unlocker handles bot detection and
-    # curl_cffi's TLS fingerprinting conflicts with the CONNECT tunnel
-    if not proxy_url:
+    if not PROXY_URL:
         try:
             from yt_dlp.networking.impersonate import ImpersonateTarget
-            import curl_cffi  # noqa: F401 - just check if available
-            opts['impersonate'] = ImpersonateTarget(client='chrome')
-        except (ImportError, Exception):
+            import curl_cffi
+
+            opts["impersonate"] = ImpersonateTarget(client="chrome")
+        except Exception:
             pass
 
     return opts
 
 
-def _download_sync(url: str) -> DownloadResult:
-    """Synchronous download function to run in thread pool."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        output_template = os.path.join(tmpdir, '%(id)s.%(ext)s')
+def _download_sync(url: str, output_dir: Path) -> DownloadResult:
+    validate_video_url(url)
+    output_template = os.path.join(output_dir, "%(id)s.%(ext)s")
+    try:
         opts = _get_ytdlp_opts(output_template)
-
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=True)
+    except DownloaderError:
+        raise
+    except Exception as error:
+        raise classify_download_error(error) from error
 
-            video_id = info.get('id')
-            mp3_path = os.path.join(tmpdir, f'{video_id}.mp3')
+    mp3_files = list(output_dir.glob("*.mp3"))
+    if len(mp3_files) != 1:
+        raise DownloaderError("conversion_failed", "Audio conversion did not produce one MP3 file", 500)
 
-            with open(mp3_path, 'rb') as f:
-                file_bytes = f.read()
+    file_path = mp3_files[0]
+    if file_path.stat().st_size > MAX_AUDIO_BYTES:
+        raise DownloaderError("audio_too_large", "Converted audio exceeds the 50MB limit")
 
-            return DownloadResult(
-                file_bytes=file_bytes,
-                title=info.get('title', ''),
-                duration=info.get('duration', 0),
-                channel=info.get('channel', ''),
-                video_id=video_id,
-            )
+    return DownloadResult(
+        file_path=file_path,
+        title=info.get("title") or "Video Audio",
+        duration=int(info.get("duration") or 0),
+        channel=info.get("channel") or info.get("uploader") or "Unknown Artist",
+        video_id=info.get("id") or file_path.stem,
+    )
 
 
-async def extract_audio(url: str) -> DownloadResult:
-    """
-    Download audio from a video URL.
+async def extract_audio(url: str, output_dir: Path) -> DownloadResult:
+    return await asyncio.to_thread(_download_sync, url, output_dir)
 
-    Args:
-        url: Video URL (YouTube, Instagram, or TikTok)
 
-    Returns:
-        DownloadResult with file bytes and metadata
+def _probe_sync(url: str) -> dict:
+    validate_video_url(url)
+    try:
+        with yt_dlp.YoutubeDL(_get_ytdlp_opts("/tmp/%(id)s.%(ext)s")) as ydl:
+            info = ydl.extract_info(url, download=False)
+    except DownloaderError:
+        raise
+    except Exception as error:
+        raise classify_download_error(error) from error
 
-    Raises:
-        yt_dlp.DownloadError: If download fails
-    """
-    return await asyncio.to_thread(_download_sync, url)
+    audio_formats = sum(1 for item in info.get("formats", []) if item.get("acodec") != "none")
+    if audio_formats == 0:
+        raise DownloaderError("no_audio_formats", "No downloadable audio formats were found", 503, True)
+
+    return {
+        "status": "healthy",
+        "video_id": info.get("id") or "unknown",
+        "title": info.get("title") or "Unknown title",
+        "audio_formats": audio_formats,
+    }
+
+
+async def probe_video(url: str) -> dict:
+    return await asyncio.to_thread(_probe_sync, url)

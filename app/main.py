@@ -17,8 +17,6 @@ from app.models import (
     ProbeRequest,
     ProbeResponse,
 )
-from app.downloader import probe_video
-from app.services.extraction import extract_and_notify, extract_to_simple_path, extract_to_user_path
 from app.services.health import get_health
 
 
@@ -51,11 +49,15 @@ async def handle_downloader_error(_: Request, error: DownloaderError) -> JSONRes
 
 @app.post("/extract", response_model=ExtractResponse)
 async def extract_endpoint(request: ExtractRequest, _: str = Depends(verify_api_key)):
+    from app.services.extraction import extract_to_user_path
+
     return await extract_to_user_path(str(request.url), request.user_id, request.transcription_id)
 
 
 @app.post("/extract-simple", response_model=ExtractResponse)
 async def extract_simple_endpoint(request: ExtractSimpleRequest, _: str = Depends(verify_api_key)):
+    from app.services.extraction import extract_to_simple_path
+
     return await extract_to_simple_path(str(request.url))
 
 
@@ -65,6 +67,8 @@ async def extract_async_endpoint(
     background_tasks: BackgroundTasks,
     _: str = Depends(verify_api_key),
 ):
+    from app.services.extraction import extract_and_notify
+
     background_tasks.add_task(
         extract_and_notify,
         str(request.url),
@@ -77,6 +81,8 @@ async def extract_async_endpoint(
 
 @app.post("/probe", response_model=ProbeResponse)
 async def probe_endpoint(request: ProbeRequest, _: str = Depends(verify_api_key)):
+    from app.downloader import probe_video
+
     return await probe_video(str(request.url))
 
 

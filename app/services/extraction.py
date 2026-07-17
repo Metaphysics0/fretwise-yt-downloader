@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import tempfile
 from pathlib import Path
@@ -12,6 +13,7 @@ from app.storage import upload_to_r2
 
 
 logger = logging.getLogger(__name__)
+_extraction_slot = asyncio.Semaphore(1)
 
 
 def _response(result: DownloadResult, r2_url: str) -> ExtractResponse:
@@ -37,17 +39,19 @@ async def extract_to_user_path(
 
 
 async def extract_to_simple_path(url: str) -> ExtractResponse:
-    with tempfile.TemporaryDirectory() as directory:
-        result = await extract_audio(url, Path(directory))
-        r2_url = await _upload(result, f"downloads/{result.video_id}.mp3")
-        return _response(result, r2_url)
+    async with _extraction_slot:
+        with tempfile.TemporaryDirectory() as directory:
+            result = await extract_audio(url, Path(directory))
+            r2_url = await _upload(result, f"downloads/{result.video_id}.mp3")
+            return _response(result, r2_url)
 
 
 async def _extract_and_upload(url: str, key: str) -> ExtractResponse:
-    with tempfile.TemporaryDirectory() as directory:
-        result = await extract_audio(url, Path(directory))
-        r2_url = await _upload(result, key)
-        return _response(result, r2_url)
+    async with _extraction_slot:
+        with tempfile.TemporaryDirectory() as directory:
+            result = await extract_audio(url, Path(directory))
+            r2_url = await _upload(result, key)
+            return _response(result, r2_url)
 
 
 async def _upload(result: DownloadResult, key: str) -> str:

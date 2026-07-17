@@ -1,223 +1,62 @@
-"""
-FastAPI application for audio extraction from video platforms.
-
-Provides endpoints for extracting audio from YouTube, Instagram, and TikTok and uploading to R2.
-"""
-
-import os
-import subprocess
 import logging
-import traceback
-import httpx
+import os
+
 import sentry_sdk
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, Request
+from fastapi.responses import JSONResponse
 
-from fastapi import FastAPI, HTTPException, Header, Depends, BackgroundTasks
-from pydantic import BaseModel, HttpUrl
+from app.errors import DownloaderError
+from app.models import (
+    ErrorDetail,
+    ErrorResponse,
+    ExtractAsyncRequest,
+    ExtractAsyncResponse,
+    ExtractRequest,
+    ExtractResponse,
+    ExtractSimpleRequest,
+    ProbeRequest,
+    ProbeResponse,
+)
+from app.downloader import probe_video
+from app.services.extraction import extract_and_notify, extract_to_simple_path, extract_to_user_path
+from app.services.health import get_health
 
-from app.downloader import extract_audio
-from app.storage import upload_to_r2
-from app.paths import audio_path, detect_platform
 
-# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-sentry_dsn = os.environ.get("SENTRY_DSN")
-if sentry_dsn:
-    sentry_sdk.init(
-        dsn=sentry_dsn,
-        send_default_pii=True,
-        enable_logs=True,
-    )
-else:
-    logger.warning("Sentry disabled: SENTRY_DSN is not set")
+if sentry_dsn := os.getenv("SENTRY_DSN"):
+    sentry_sdk.init(dsn=sentry_dsn)
+
+app = FastAPI(title="FretWise Audio Extractor", version="2.0.0")
 
 
-app = FastAPI(
-    title="FretWise Audio Extractor",
-    description="Downloads audio from YouTube, Instagram, and TikTok and uploads to R2",
-    version="1.1.0",
-)
-
-
-# Request/Response models
-
-class ExtractRequest(BaseModel):
-    url: HttpUrl
-    user_id: str
-    transcription_id: str
-
-
-class ExtractAsyncRequest(BaseModel):
-    url: HttpUrl
-    user_id: str
-    transcription_id: str
-    webhook_url: HttpUrl
-
-
-class ExtractSimpleRequest(BaseModel):
-    url: HttpUrl
-
-
-class VideoMetadata(BaseModel):
-    title: str
-    duration: int
-    channel: str
-    video_id: str
-
-
-class ExtractResponse(BaseModel):
-    status: str
-    r2_url: str
-    metadata: VideoMetadata
-
-
-class ExtractAsyncResponse(BaseModel):
-    status: str
-    message: str
-
-
-class WebhookPayload(BaseModel):
-    status: str  # "completed" or "error"
-    transcription_id: str
-    r2_url: str | None = None
-    error: str | None = None
-    metadata: VideoMetadata | None = None
-
-
-class HealthResponse(BaseModel):
-    status: str
-    ytdlp_version: str
-    pot_server: str
-    cookies: str
-    proxy: str
-
-
-# Auth dependency
-
-async def verify_api_key(x_api_key: str = Header(...)):
-    """Verify API key from request header."""
-    expected_key = os.environ.get('API_KEY')
-    if not expected_key:
-        raise HTTPException(status_code=500, detail="API_KEY not configured")
-    if x_api_key != expected_key:
-        raise HTTPException(status_code=401, detail="Invalid API key")
+async def verify_api_key(x_api_key: str = Header(...)) -> str:
+    expected = os.getenv("API_KEY")
+    if not expected:
+        raise DownloaderError("service_unavailable", "Downloader is not configured", 503, True)
+    if x_api_key != expected:
+        raise DownloaderError("unauthorized", "Invalid API key", 401)
     return x_api_key
 
 
-# Endpoints
+@app.exception_handler(DownloaderError)
+async def handle_downloader_error(_: Request, error: DownloaderError) -> JSONResponse:
+    logger.error("Extraction failed", extra={"code": error.code, "retryable": error.retryable})
+    body = ErrorResponse(
+        error=ErrorDetail(code=error.code, message=error.message, retryable=error.retryable)
+    )
+    return JSONResponse(status_code=error.status_code, content=body.model_dump())
+
 
 @app.post("/extract", response_model=ExtractResponse)
-async def extract_endpoint(
-    request: ExtractRequest,
-    _: str = Depends(verify_api_key),
-):
-    """
-    Extract audio from a YouTube, Instagram, or TikTok video and upload to R2.
-
-    This endpoint:
-    1. Downloads audio from the URL using yt-dlp
-    2. Uploads the MP3 to R2 at the user-scoped path
-    3. Returns the public R2 URL and video metadata
-
-    Note: This is a synchronous operation that blocks for 15-45 seconds.
-    """
-    try:
-        logger.info(f"Processing extract request for URL: {request.url}")
-
-        # Download audio
-        logger.info("Starting audio download...")
-        result = await extract_audio(str(request.url))
-        logger.info(f"Download complete: {result.title} ({result.duration}s)")
-
-        # Upload to R2
-        platform = detect_platform(str(request.url))
-        r2_key = audio_path(platform, request.user_id, request.transcription_id)
-        logger.info(f"Uploading to R2: {r2_key}")
-        r2_url = await upload_to_r2(
-            file_bytes=result.file_bytes,
-            key=r2_key,
-            content_type="audio/mpeg",
-        )
-        logger.info(f"Upload complete: {r2_url}")
-
-        return ExtractResponse(
-            status="completed",
-            r2_url=r2_url,
-            metadata=VideoMetadata(
-                title=result.title,
-                duration=int(result.duration or 0),
-                channel=result.channel,
-                video_id=result.video_id,
-            ),
-        )
-
-    except Exception as e:
-        error_detail = str(e) or f"{type(e).__name__}: {repr(e)}"
-        logger.error(f"Extract failed: {error_detail}")
-        logger.error(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=error_detail)
+async def extract_endpoint(request: ExtractRequest, _: str = Depends(verify_api_key)):
+    return await extract_to_user_path(str(request.url), request.user_id, request.transcription_id)
 
 
-async def process_extract_and_webhook(
-    url: str,
-    user_id: str,
-    transcription_id: str,
-    webhook_url: str,
-):
-    """Background task: download, upload to R2, then call webhook."""
-    try:
-        logger.info(f"[ASYNC] Starting extract for {url}")
-
-        # Download audio
-        result = await extract_audio(url)
-        logger.info(f"[ASYNC] Download complete: {result.title} ({result.duration}s)")
-
-        # Upload to R2
-        platform = detect_platform(url)
-        r2_key = audio_path(platform, user_id, transcription_id)
-        logger.info(f"[ASYNC] Uploading to R2: {r2_key}")
-        r2_url = await upload_to_r2(
-            file_bytes=result.file_bytes,
-            key=r2_key,
-            content_type="audio/mpeg",
-        )
-        logger.info(f"[ASYNC] Upload complete: {r2_url}")
-
-        # Call webhook with success
-        payload = WebhookPayload(
-            status="completed",
-            transcription_id=transcription_id,
-            r2_url=r2_url,
-            metadata=VideoMetadata(
-                title=result.title,
-                duration=int(result.duration or 0),
-                channel=result.channel,
-                video_id=result.video_id,
-            ),
-        )
-
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            logger.info(f"[ASYNC] Calling webhook: {webhook_url}")
-            response = await client.post(webhook_url, json=payload.model_dump())
-            logger.info(f"[ASYNC] Webhook response: {response.status_code}")
-
-    except Exception as e:
-        error_detail = str(e) or f"{type(e).__name__}: {repr(e)}"
-        logger.error(f"[ASYNC] Extract failed: {error_detail}")
-        logger.error(traceback.format_exc())
-
-        # Call webhook with error
-        try:
-            payload = WebhookPayload(
-                status="error",
-                transcription_id=transcription_id,
-                error=error_detail,
-            )
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                await client.post(webhook_url, json=payload.model_dump())
-        except Exception as webhook_err:
-            logger.error(f"[ASYNC] Failed to call error webhook: {webhook_err}")
+@app.post("/extract-simple", response_model=ExtractResponse)
+async def extract_simple_endpoint(request: ExtractSimpleRequest, _: str = Depends(verify_api_key)):
+    return await extract_to_simple_path(str(request.url))
 
 
 @app.post("/extract-async", response_model=ExtractAsyncResponse)
@@ -226,149 +65,27 @@ async def extract_async_endpoint(
     background_tasks: BackgroundTasks,
     _: str = Depends(verify_api_key),
 ):
-    """
-    Extract audio from a YouTube, Instagram, or TikTok video asynchronously.
-
-    This endpoint:
-    1. Accepts the request and returns immediately
-    2. Downloads audio in the background
-    3. Uploads to R2
-    4. Calls the webhook_url with the result
-
-    Webhook payload on success:
-    {
-        "status": "completed",
-        "transcription_id": "...",
-        "r2_url": "https://...",
-        "metadata": { "title": "...", "duration": 123, "channel": "...", "video_id": "..." }
-    }
-
-    Webhook payload on error:
-    {
-        "status": "error",
-        "transcription_id": "...",
-        "error": "Error message"
-    }
-    """
-    logger.info(f"[ASYNC] Queued extract request for URL: {request.url}")
-
     background_tasks.add_task(
-        process_extract_and_webhook,
+        extract_and_notify,
         str(request.url),
         request.user_id,
         request.transcription_id,
         str(request.webhook_url),
     )
-
-    return ExtractAsyncResponse(
-        status="accepted",
-        message="Download queued. Webhook will be called on completion.",
-    )
+    return ExtractAsyncResponse(status="accepted", message="Download queued")
 
 
-@app.post("/extract-simple", response_model=ExtractResponse)
-async def extract_simple_endpoint(
-    request: ExtractSimpleRequest,
-    _: str = Depends(verify_api_key),
-):
-    """
-    Extract audio from a YouTube, Instagram, or TikTok video with a simple storage path.
-
-    This is a simplified endpoint for general use that stores files at:
-        downloads/{video_id}.mp3
-
-    Useful for testing or non-FretWise applications.
-    """
-    try:
-        logger.info(f"Processing simple extract request for URL: {request.url}")
-
-        # Download audio
-        logger.info("Starting audio download...")
-        result = await extract_audio(str(request.url))
-        logger.info(f"Download complete: {result.title} ({result.duration}s)")
-
-        # Upload to R2 with simple path
-        r2_key = f"downloads/{result.video_id}.mp3"
-        logger.info(f"Uploading to R2: {r2_key}")
-        r2_url = await upload_to_r2(
-            file_bytes=result.file_bytes,
-            key=r2_key,
-            content_type="audio/mpeg",
-        )
-        logger.info(f"Upload complete: {r2_url}")
-
-        return ExtractResponse(
-            status="completed",
-            r2_url=r2_url,
-            metadata=VideoMetadata(
-                title=result.title,
-                duration=int(result.duration or 0),
-                channel=result.channel,
-                video_id=result.video_id,
-            ),
-        )
-
-    except Exception as e:
-        error_detail = str(e) or f"{type(e).__name__}: {repr(e)}"
-        logger.error(f"Simple extract failed: {error_detail}")
-        logger.error(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=error_detail)
+@app.post("/probe", response_model=ProbeResponse)
+async def probe_endpoint(request: ProbeRequest, _: str = Depends(verify_api_key)):
+    return await probe_video(str(request.url))
 
 
-@app.get("/health", response_model=HealthResponse)
+@app.get("/health")
 async def health_endpoint():
-    """
-    Health check endpoint.
+    return await get_health()
 
-    Returns service status, yt-dlp version, and POT server status.
-    """
-    try:
-        result = subprocess.run(
-            ["yt-dlp", "--version"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        ytdlp_version = result.stdout.strip()
-    except Exception:
-        ytdlp_version = "unknown"
 
-    # Check POT server health
-    pot_status = "unhealthy"
-    try:
-        async with httpx.AsyncClient(timeout=3.0) as client:
-            resp = await client.get("http://127.0.0.1:4416/ping")
-            if resp.status_code == 200:
-                pot_status = "healthy"
-    except Exception:
-        pass
-
-    # Check cookies
-    from pathlib import Path
-    cookie_path = os.getenv('COOKIE_PATH', '/config/cookies.txt')
-    cookie_file = Path(cookie_path)
-    if cookie_file.exists():
-        size_kb = cookie_file.stat().st_size / 1024
-        cookies_status = f"found ({size_kb:.1f} KB)"
-    else:
-        cookies_status = "missing"
-
-    # Check proxy
-    proxy_url = os.getenv('PROXY_URL')
-    if proxy_url:
-        # Mask credentials in the URL for the response
-        from urllib.parse import urlparse
-        parsed = urlparse(proxy_url)
-        proxy_status = f"configured ({parsed.hostname})"
-    else:
-        proxy_status = "not configured"
-
-    overall_status = "healthy" if pot_status == "healthy" else "degraded"
-
-    return HealthResponse(
-        status=overall_status,
-        ytdlp_version=ytdlp_version,
-        pot_server=pot_status,
-        cookies=cookies_status,
-        proxy=proxy_status,
-    )
+@app.get("/ready")
+async def readiness_endpoint():
+    health = await get_health()
+    return JSONResponse(status_code=200 if health["ready"] else 503, content=health)
